@@ -1,3 +1,6 @@
+Here is the complete, full updated **`main.py`** code. It keeps all your existing features (inventory, sales, customers, expenses, deletion audit logs) and includes the new `/reset-admin` endpoint so you can instantly fix the login anytime.
+
+```python
 from fastapi import FastAPI, HTTPException, Depends
 from pydantic import BaseModel
 from typing import Optional, List
@@ -158,6 +161,20 @@ class ExpenseCreate(BaseModel):
     worker_name: str
     reason: str
     amount: float
+
+# --- ADMIN RESET ROUTE ---
+@app.get("/reset-admin")
+def reset_admin(db: sqlite3.Connection = Depends(get_db)):
+    cursor = db.cursor()
+    cursor.execute("SELECT id FROM workers WHERE phone = '0700000000'")
+    row = cursor.fetchone()
+    if row:
+        cursor.execute("UPDATE workers SET password = 'admin123', role = 'Admin' WHERE phone = '0700000000'")
+    else:
+        cursor.execute("INSERT INTO workers (name, phone, password, role) VALUES (?, ?, ?, ?)", 
+                       ("System Admin", "0700000000", "admin123", "Admin"))
+    db.commit()
+    return {"message": "Admin account reset successfully! Phone: 0700000000, Password: admin123"}
 
 # --- WORKERS ROUTES ---
 @app.get("/workers")
@@ -333,3 +350,5 @@ def get_audit_logs(db: sqlite3.Connection = Depends(get_db)):
     cursor = db.cursor()
     cursor.execute("SELECT * FROM deletion_logs ORDER BY id DESC")
     return [dict(row) for row in cursor.fetchall()]
+
+```
