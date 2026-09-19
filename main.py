@@ -348,4 +348,3 @@ def get_audit_logs(db: sqlite3.Connection = Depends(get_db)):
     cursor.execute("SELECT * FROM deletion_logs ORDER BY id DESC")
     return [dict(row) for row in cursor.fetchall()]
 
-```
