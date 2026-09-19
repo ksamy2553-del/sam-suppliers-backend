@@ -92,7 +92,6 @@ def init_db():
         )
     """)
     
-    # Forcefully ensure default admin account always exists with correct credentials
     cursor.execute("""
         INSERT OR REPLACE INTO workers (id, name, phone, password, role)
         VALUES (
@@ -159,7 +158,6 @@ class ExpenseCreate(BaseModel):
     reason: str
     amount: float
 
-# --- ADMIN RESET ROUTE ---
 @app.get("/reset-admin")
 def reset_admin(db: sqlite3.Connection = Depends(get_db)):
     cursor = db.cursor()
@@ -173,7 +171,6 @@ def reset_admin(db: sqlite3.Connection = Depends(get_db)):
     db.commit()
     return {"message": "Admin account reset successfully! Phone: 0700000000, Password: admin123"}
 
-# --- WORKERS ROUTES ---
 @app.get("/workers")
 def get_workers(db: sqlite3.Connection = Depends(get_db)):
     cursor = db.cursor()
@@ -202,7 +199,6 @@ def login_worker(cred: WorkerLogin, db: sqlite3.Connection = Depends(get_db)):
         raise HTTPException(status_code=401, detail="Invalid phone number or password")
     return dict(worker)
 
-# --- PRODUCTS ROUTES ---
 @app.get("/products")
 def get_products(db: sqlite3.Connection = Depends(get_db)):
     cursor = db.cursor()
@@ -249,7 +245,6 @@ def delete_product(product_id: int, reason: str = "No reason provided", db: sqli
     db.commit()
     return {"message": "Product deleted successfully"}
 
-# --- CUSTOMERS ROUTES ---
 @app.get("/customers")
 def get_customers(db: sqlite3.Connection = Depends(get_db)):
     cursor = db.cursor()
@@ -283,7 +278,6 @@ def delete_customer(customer_id: int, reason: str = "No reason provided", db: sq
     db.commit()
     return {"message": "Customer deleted successfully"}
 
-# --- SALES ROUTES ---
 @app.get("/sales")
 def get_sales(db: sqlite3.Connection = Depends(get_db)):
     cursor = db.cursor()
@@ -323,7 +317,6 @@ def delete_sale(sale_id: int, reason: str = "No reason provided", db: sqlite3.Co
     db.commit()
     return {"message": "Sale deleted successfully"}
 
-# --- EXPENSES ROUTES ---
 @app.get("/expenses")
 def get_expenses(db: sqlite3.Connection = Depends(get_db)):
     cursor = db.cursor()
@@ -341,10 +334,8 @@ def create_expense(exp: ExpenseCreate, db: sqlite3.Connection = Depends(get_db))
     db.commit()
     return {"message": "Expense recorded successfully"}
 
-# --- AUDIT LOGS ROUTE ---
 @app.get("/audit-logs")
 def get_audit_logs(db: sqlite3.Connection = Depends(get_db)):
     cursor = db.cursor()
     cursor.execute("SELECT * FROM deletion_logs ORDER BY id DESC")
     return [dict(row) for row in cursor.fetchall()]
-
