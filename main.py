@@ -81,6 +81,16 @@ def init_db():
             amount REAL NOT NULL
         )
     """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS deletion_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            item_type TEXT,
+            item_identifier TEXT,
+            reason TEXT,
+            deleted_at TEXT
+        )
+    """)
     
     for col, definition in [
         ("address", "TEXT DEFAULT 'Walk-in'"),
@@ -96,7 +106,6 @@ def init_db():
         except sqlite3.OperationalError:
             pass
     
-    # Seed default Admin worker if table is empty
     cursor.execute("SELECT COUNT(*) FROM workers")
     if cursor.fetchone()[0] == 0:
         cursor.execute("""
@@ -140,9 +149,6 @@ class ProductCreate(BaseModel):
 class RestockRequest(BaseModel):
     boxes_to_add: int = 0
     pieces_to_add: int = 0
-
-class StockUpdateSchema(BaseModel):
-    total_base_stock: int
 
 class CustomerCreate(BaseModel):
     name: str
@@ -281,6 +287,25 @@ def create_customer(cust: CustomerCreate, db: sqlite3.Connection = Depends(get_d
     )
     db.commit()
     return {"message": "Customer created successfully"}
+
+@app.delete("/customers/{customer_id}")
+def delete_customer(customer_id: int, reason: str = "No reason provided", db: sqlite3.Connection = Depends(get_db)):
+    cursor = db.cursor()
+    cursor.execute("SELECT * FROM customers WHERE id = ?", (customer_id,))
+    cust = cursor.fetchone()
+    if not cust:
+        raise HTTPException(status_code=404, detail="Customer not found")
+    
+    # Log the deletion
+    deleted_at = datetime.now().strftime("%Y-%m-%d %H:%M")
+    cursor.execute(
+        "INSERT INTO deletion_logs (item_type, item_identifier, reason, deleted_at) VALUES (?, ?, ?, ?)",
+        ("Customer", cust["name"], reason, deleted_at)
+    )
+    
+    cursor.execute("DELETE FROM customers WHERE id = ?", (customer_id,))
+    db.commit()
+    return {"message": "Customer deleted successfully"}
 
 @app.post("/customers/{customer_id}/clear-credit")
 def clear_customer_credit(customer_id: int, payload: CreditPaymentRequest, db: sqlite3.Connection = Depends(get_db)):
