@@ -92,13 +92,17 @@ def init_db():
         )
     """)
     
-    # Ensure default admin always exists even if other workers are in the db
-    cursor.execute("SELECT COUNT(*) FROM workers WHERE phone = '0700000000'")
-    if cursor.fetchone()[0] == 0:
-        cursor.execute("""
-            INSERT INTO workers (name, phone, password, role)
-            VALUES (?, ?, ?, ?)
-        """, ("System Admin", "0700000000", "admin123", "Admin"))
+    # Forcefully ensure default admin account always exists with correct credentials
+    cursor.execute("""
+        INSERT OR REPLACE INTO workers (id, name, phone, password, role)
+        VALUES (
+            COALESCE((SELECT id FROM workers WHERE phone = '0700000000'), (SELECT MAX(id)+1 FROM workers), 1),
+            'System Admin',
+            '0700000000',
+            'admin123',
+            'Admin'
+        )
+    """)
 
     cursor.execute("SELECT COUNT(*) FROM products")
     if cursor.fetchone()[0] == 0:
