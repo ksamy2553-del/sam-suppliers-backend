@@ -92,20 +92,6 @@ def init_db():
         )
     """)
     
-    for col, definition in [
-        ("address", "TEXT DEFAULT 'Walk-in'"),
-        ("opening_credit", "REAL DEFAULT 0.0"),
-        ("discount", "REAL DEFAULT 0.0"),
-        ("payment_status", "TEXT DEFAULT 'Cash'"),
-        ("delivery_option", "TEXT DEFAULT 'Pick up'"),
-        ("sale_date", "TEXT")
-    ]:
-        try:
-            target_table = "sales" if col in ["discount", "payment_status", "delivery_option", "sale_date"] else "customers"
-            cursor.execute(f"ALTER TABLE {target_table} ADD COLUMN {col} {definition}")
-        except sqlite3.OperationalError:
-            pass
-    
     cursor.execute("SELECT COUNT(*) FROM workers")
     if cursor.fetchone()[0] == 0:
         cursor.execute("""
@@ -137,7 +123,6 @@ class WorkerCreate(BaseModel):
 
 class ProductCreate(BaseModel):
     name: str
-    base_unit_name: Optional[str] = "piece"
     pieces_per_box: int
     wholesale_price_per_box: float
     retail_price_per_box: float
@@ -146,51 +131,30 @@ class ProductCreate(BaseModel):
     boxes_in_stock: int = 0
     pieces_in_stock: int = 0
 
-class RestockRequest(BaseModel):
-    boxes_to_add: int = 0
-    pieces_to_add: int = 0
-
 class CustomerCreate(BaseModel):
     name: str
     phone: Optional[str] = None
     address: Optional[str] = "Walk-in"
     opening_credit: Optional[float] = 0.0
 
-class CreditPaymentRequest(BaseModel):
-    amount_cleared: float
+class SaleCreate(BaseModel):
+    product_id: int
+    unit_sold: str
+    quantity_sold: int
+    price_type: str
+    total_price: float
+    discount: float = 0.0
+    amount_paid: float
+    payment_status: str = "Cash"
+    delivery_option: str = "Pick up"
+    customer_id: Optional[int] = None
 
 class ExpenseCreate(BaseModel):
     worker_name: str
     reason: str
     amount: float
 
-class CartItem(BaseModel):
-    product_id: int
-    unit_type: str
-    quantity: int
-    price_type: str
-
-class CheckoutRequest(BaseModel):
-    customer_id: Optional[int] = None
-    items: List[CartItem]
-    discount: float = 0.0
-    amount_paid: float
-    payment_status: str
-    delivery_option: str
-
-@app.post("/worker/login")
-def worker_login(creds: WorkerLogin, db: sqlite3.Connection = Depends(get_db)):
-    cursor = db.cursor()
-    cursor.execute("SELECT * FROM workers WHERE phone = ? AND password = ?", (creds.phone, creds.password))
-    worker = cursor.fetchone()
-    if not worker:
-        raise HTTPException(status_code=401, detail="Invalid telephone number or password")
-    return {
-        "message": "Login successful",
-        "worker_name": worker["name"],
-        "role": worker["role"]
-    }
-
+# --- WORKERS ROUTES ---
 @app.get("/workers")
 def get_workers(db: sqlite3.Connection = Depends(get_db)):
     cursor = db.cursor()
@@ -210,23 +174,27 @@ def create_worker(worker: WorkerCreate, db: sqlite3.Connection = Depends(get_db)
         raise HTTPException(status_code=400, detail="Worker with this phone number already exists.")
     return {"message": "Worker created successfully"}
 
+@app.post("/workers/login")
+def login_worker(cred: WorkerLogin, db: sqlite3.Connection = Depends(get_db)):
+    cursor = db.cursor()
+    cursor.execute("SELECT * FROM workers WHERE phone = ? AND password = ?", (cred.phone, cred.password))
+    worker = cursor.fetchone()
+    if not worker:
+        raise HTTPException(status_code=401, detail="Invalid phone number or password")
+    return dict(worker)
+
+# --- PRODUCTS ROUTES ---
 @app.get("/products")
 def get_products(db: sqlite3.Connection = Depends(get_db)):
     cursor = db.cursor()
     cursor.execute("SELECT * FROM products")
     rows = cursor.fetchall()
-    
     products = []
     for r in rows:
         p_dict = dict(r)
         boxes = p_dict["total_base_stock"] // p_dict["pieces_per_box"]
         pieces = p_dict["total_base_stock"] % p_dict["pieces_per_box"]
         p_dict["stock_display"] = f"{boxes} Box(es), {pieces} Piece(s)"
-        p_dict["is_low_stock"] = boxes < 2
-        p_dict["box_pricing"] = {
-            "retail_price_per_box": p_dict["retail_price_per_box"],
-            "wholesale_price_per_box": p_dict["wholesale_price_per_box"]
-        }
         products.append(p_dict)
     return products
 
@@ -234,7 +202,6 @@ def get_products(db: sqlite3.Connection = Depends(get_db)):
 def create_product(prod: ProductCreate, db: sqlite3.Connection = Depends(get_db)):
     cursor = db.cursor()
     total_base_stock = (prod.boxes_in_stock * prod.pieces_per_box) + prod.pieces_in_stock
-    
     cursor.execute("""
         INSERT INTO products (name, pieces_per_box, total_base_stock, retail_price_per_base, wholesale_price_per_base, retail_price_per_box, wholesale_price_per_box)
         VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -246,37 +213,29 @@ def create_product(prod: ProductCreate, db: sqlite3.Connection = Depends(get_db)
     db.commit()
     return {"message": "Product created successfully"}
 
-@app.post("/products/{product_id}/restock")
-def restock_product(product_id: int, restock: RestockRequest, db: sqlite3.Connection = Depends(get_db)):
+@app.delete("/products/{product_id}")
+def delete_product(product_id: int, reason: str = "No reason provided", db: sqlite3.Connection = Depends(get_db)):
     cursor = db.cursor()
     cursor.execute("SELECT * FROM products WHERE id = ?", (product_id,))
-    product = cursor.fetchone()
-    if not product:
+    prod = cursor.fetchone()
+    if not prod:
         raise HTTPException(status_code=404, detail="Product not found")
     
-    pieces_per_box = product["pieces_per_box"]
-    current_stock = product["total_base_stock"]
-    added_base = (restock.boxes_to_add * pieces_per_box) + restock.pieces_to_add
-    
-    cursor.execute("UPDATE products SET total_base_stock = ? WHERE id = ?", (current_stock + added_base, product_id))
+    deleted_at = datetime.now().strftime("%Y-%m-%d %H:%M")
+    cursor.execute(
+        "INSERT INTO deletion_logs (item_type, item_identifier, reason, deleted_at) VALUES (?, ?, ?, ?)",
+        ("Product", prod["name"], reason, deleted_at)
+    )
+    cursor.execute("DELETE FROM products WHERE id = ?", (product_id,))
     db.commit()
-    return {"message": "Stock updated successfully"}
+    return {"message": "Product deleted successfully"}
 
+# --- CUSTOMERS ROUTES ---
 @app.get("/customers")
 def get_customers(db: sqlite3.Connection = Depends(get_db)):
     cursor = db.cursor()
-    cursor.execute("""
-        SELECT c.*, 
-        COALESCE((SELECT SUM(s.total_price - s.discount - s.amount_paid) FROM sales s WHERE s.customer_id = c.id), 0.0) as sales_credit
-        FROM customers c
-    """)
-    rows = cursor.fetchall()
-    customers = []
-    for r in rows:
-        d = dict(r)
-        d["total_credit_owed"] = d.get("opening_credit", 0.0) + d.get("sales_credit", 0.0)
-        customers.append(d)
-    return customers
+    cursor.execute("SELECT * FROM customers")
+    return [dict(row) for row in cursor.fetchall()]
 
 @app.post("/customers")
 def create_customer(cust: CustomerCreate, db: sqlite3.Connection = Depends(get_db)):
@@ -296,155 +255,56 @@ def delete_customer(customer_id: int, reason: str = "No reason provided", db: sq
     if not cust:
         raise HTTPException(status_code=404, detail="Customer not found")
     
-    # Log the deletion
     deleted_at = datetime.now().strftime("%Y-%m-%d %H:%M")
     cursor.execute(
         "INSERT INTO deletion_logs (item_type, item_identifier, reason, deleted_at) VALUES (?, ?, ?, ?)",
         ("Customer", cust["name"], reason, deleted_at)
     )
-    
     cursor.execute("DELETE FROM customers WHERE id = ?", (customer_id,))
     db.commit()
     return {"message": "Customer deleted successfully"}
 
-@app.post("/customers/{customer_id}/clear-credit")
-def clear_customer_credit(customer_id: int, payload: CreditPaymentRequest, db: sqlite3.Connection = Depends(get_db)):
-    cursor = db.cursor()
-    cursor.execute("SELECT * FROM customers WHERE id = ?", (customer_id,))
-    cust = cursor.fetchone()
-    if not cust:
-        raise HTTPException(status_code=404, detail="Customer not found")
-    
-    opening = cust["opening_credit"]
-    if opening >= payload.amount_cleared:
-        new_opening = opening - payload.amount_cleared
-        cursor.execute("UPDATE customers SET opening_credit = ? WHERE id = ?", (new_opening, customer_id))
-    else:
-        remainder = payload.amount_cleared - opening
-        cursor.execute("UPDATE customers SET opening_credit = 0.0 WHERE id = ?", (customer_id,))
-        cursor.execute("SELECT * FROM sales WHERE customer_id = ? ORDER BY id ASC", (customer_id,))
-        sales_rows = cursor.fetchall()
-        for s in sales_rows:
-            due = (s["total_price"] - s["discount"]) - s["amount_paid"]
-            if due > 0 and remainder > 0:
-                pay_add = min(due, remainder)
-                new_paid = s["amount_paid"] + pay_add
-                cursor.execute("UPDATE sales SET amount_paid = ? WHERE id = ?", (new_paid, s["id"]))
-                remainder -= pay_add
-    db.commit()
-    return {"message": "Credit payment recorded successfully"}
-
-@app.post("/checkout")
-def process_checkout(checkout: CheckoutRequest, db: sqlite3.Connection = Depends(get_db)):
-    cursor = db.cursor()
-    sale_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
-    
-    computed_subtotal = 0.0
-    item_details = []
-    
-    for item in checkout.items:
-        cursor.execute("SELECT * FROM products WHERE id = ?", (item.product_id,))
-        product = cursor.fetchone()
-        if not product:
-            raise HTTPException(status_code=404, detail=f"Product ID {item.product_id} not found")
-        
-        pieces_per_box = product["pieces_per_box"]
-        if item.unit_type == "box":
-            qty_in_base = item.quantity * pieces_per_box
-            unit_price = product["wholesale_price_per_box"] if item.price_type == "wholesale" else product["retail_price_per_box"]
-        else:
-            qty_in_base = item.quantity
-            unit_price = product["wholesale_price_per_base"] if item.price_type == "wholesale" else product["retail_price_per_base"]
-            
-        if product["total_base_stock"] < qty_in_base:
-            raise HTTPException(status_code=400, detail=f"Insufficient stock for {product['name']}!")
-            
-        line_total = unit_price * item.quantity
-        computed_subtotal += line_total
-        item_details.append({
-            "product_id": item.product_id,
-            "unit_type": item.unit_type,
-            "quantity": item.quantity,
-            "price_type": item.price_type,
-            "line_total": line_total,
-            "qty_in_base": qty_in_base
-        })
-
-    final_total = max(0.0, computed_subtotal - checkout.discount)
-    
-    for detail in item_details:
-        cursor.execute("SELECT total_base_stock FROM products WHERE id = ?", (detail["product_id"],))
-        curr_stock = cursor.fetchone()["total_base_stock"]
-        new_stock = curr_stock - detail["qty_in_base"]
-        cursor.execute("UPDATE products SET total_base_stock = ? WHERE id = ?", (new_stock, detail["product_id"]))
-        
-        item_proportion = detail["line_total"] / computed_subtotal if computed_subtotal > 0 else 0
-        item_paid = checkout.amount_paid * item_proportion
-        item_disc = checkout.discount * item_proportion
-        
-        cursor.execute("""
-            INSERT INTO sales (product_id, unit_sold, quantity_sold, price_type, total_price, discount, amount_paid, payment_status, delivery_option, customer_id, sale_date)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            detail["product_id"], detail["unit_type"], detail["quantity"], detail["price_type"],
-            detail["line_total"], item_disc, item_paid, checkout.payment_status, checkout.delivery_option,
-            checkout.customer_id, sale_timestamp
-        ))
-        
-    db.commit()
-    return {"message": "Checkout completed successfully", "total_price": final_total}
-
+# --- SALES ROUTES ---
 @app.get("/sales")
 def get_sales(db: sqlite3.Connection = Depends(get_db)):
     cursor = db.cursor()
+    cursor.execute("SELECT s.*, p.name as product_name, c.name as customer_name FROM sales s LEFT JOIN products p ON s.product_id = p.id LEFT JOIN customers c ON s.customer_id = c.id ORDER BY s.id DESC")
+    return [dict(row) for row in cursor.fetchall()]
+
+@app.post("/sales")
+def create_sale(sale: SaleCreate, db: sqlite3.Connection = Depends(get_db)):
+    cursor = db.cursor()
+    sale_date = datetime.now().strftime("%Y-%m-%d %H:%M")
     cursor.execute("""
-        SELECT s.*, p.name as product_name, c.name as customer_name, c.address as customer_address, c.phone as customer_phone
-        FROM sales s
-        LEFT JOIN products p ON s.product_id = p.id
-        LEFT JOIN customers c ON s.customer_id = c.id
-        ORDER BY s.id DESC
-    """)
-    rows = cursor.fetchall()
-    
-    sales_list = []
-    for r in rows:
-        d = dict(r)
-        if not d.get("customer_name"):
-            d["customer_name"] = "Walk-in Customer"
-        if not d.get("customer_address"):
-            d["customer_address"] = "Walk-in"
-        if not d.get("sale_date"):
-            d["sale_date"] = datetime.now().strftime("%Y-%m-%d %H:%M")
-        sales_list.append(d)
-    return sales_list
+        INSERT INTO sales (product_id, unit_sold, quantity_sold, price_type, total_price, discount, amount_paid, payment_status, delivery_option, customer_id, sale_date)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        sale.product_id, sale.unit_sold, sale.quantity_sold, sale.price_type,
+        sale.total_price, sale.discount, sale.amount_paid, sale.payment_status,
+        sale.delivery_option, sale.customer_id, sale_date
+    ))
+    db.commit()
+    return {"message": "Sale recorded successfully"}
 
 @app.delete("/sales/{sale_id}")
-def delete_sale(sale_id: int, role: str = "Staff", db: sqlite3.Connection = Depends(get_db)):
-    if role != "Admin":
-        raise HTTPException(status_code=403, detail="Unauthorized: Only admin can delete orders.")
-        
+def delete_sale(sale_id: int, reason: str = "No reason provided", db: sqlite3.Connection = Depends(get_db)):
     cursor = db.cursor()
-    cursor.execute("SELECT * FROM sales WHERE id = ?", (sale_id,))
+    cursor.execute("SELECT s.*, p.name as product_name FROM sales s LEFT JOIN products p ON s.product_id = p.id WHERE s.id = ?", (sale_id,))
     sale = cursor.fetchone()
     if not sale:
         raise HTTPException(status_code=404, detail="Sale not found")
-        
-    product_id = sale["product_id"]
-    unit_sold = sale["unit_sold"]
-    qty_sold = sale["quantity_sold"]
     
-    cursor.execute("SELECT pieces_per_box, total_base_stock FROM products WHERE id = ?", (product_id,))
-    prod = cursor.fetchone()
-    if prod:
-        pieces_per_box = prod["pieces_per_box"]
-        current_stock = prod["total_base_stock"]
-        revert_qty = (qty_sold * pieces_per_box) if unit_sold == "box" else qty_sold
-        cursor.execute("UPDATE products SET total_base_stock = ? WHERE id = ?", (current_stock + revert_qty, product_id))
-        
+    deleted_at = datetime.now().strftime("%Y-%m-%d %H:%M")
+    item_desc = f"Sale #{sale['id']} ({sale['product_name'] or 'Product'})"
+    cursor.execute(
+        "INSERT INTO deletion_logs (item_type, item_identifier, reason, deleted_at) VALUES (?, ?, ?, ?)",
+        ("Sale", item_desc, reason, deleted_at)
+    )
     cursor.execute("DELETE FROM sales WHERE id = ?", (sale_id,))
     db.commit()
-    return {"message": "Sale deleted and stock restored"}
+    return {"message": "Sale deleted successfully"}
 
+# --- EXPENSES ROUTES ---
 @app.get("/expenses")
 def get_expenses(db: sqlite3.Connection = Depends(get_db)):
     cursor = db.cursor()
@@ -462,27 +322,9 @@ def create_expense(exp: ExpenseCreate, db: sqlite3.Connection = Depends(get_db))
     db.commit()
     return {"message": "Expense recorded successfully"}
 
-@app.get("/dashboard")
-def get_dashboard(db: sqlite3.Connection = Depends(get_db)):
+# --- AUDIT LOGS ROUTE ---
+@app.get("/audit-logs")
+def get_audit_logs(db: sqlite3.Connection = Depends(get_db)):
     cursor = db.cursor()
-    cursor.execute("SELECT SUM(total_price - discount) FROM sales")
-    total_sales_res = cursor.fetchone()[0]
-    todays_sales = total_sales_res if total_sales_res else 0.0
-    
-    cursor.execute("SELECT SUM((total_price - discount) - amount_paid) FROM sales")
-    sales_credit_res = cursor.fetchone()[0]
-    sales_credit = sales_credit_res if sales_credit_res else 0.0
-    
-    cursor.execute("SELECT SUM(opening_credit) FROM customers")
-    opening_credit_res = cursor.fetchone()[0]
-    opening_credit = opening_credit_res if opening_credit_res else 0.0
-    
-    cursor.execute("SELECT SUM(amount) FROM expenses")
-    expenses_res = cursor.fetchone()[0]
-    total_expenses = expenses_res if expenses_res else 0.0
-    
-    return {
-        "todays_sales": todays_sales,
-        "credit_owed_by_customers": sales_credit + opening_credit,
-        "total_expenses": total_expenses
-    }
+    cursor.execute("SELECT * FROM deletion_logs ORDER BY id DESC")
+    return [dict(row) for row in cursor.fetchall()]
