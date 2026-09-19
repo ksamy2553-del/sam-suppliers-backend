@@ -92,7 +92,8 @@ def init_db():
         )
     """)
     
-    cursor.execute("SELECT COUNT(*) FROM workers")
+    # Ensure default admin always exists even if other workers are in the db
+    cursor.execute("SELECT COUNT(*) FROM workers WHERE phone = '0700000000'")
     if cursor.fetchone()[0] == 0:
         cursor.execute("""
             INSERT INTO workers (name, phone, password, role)
