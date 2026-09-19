@@ -1,6 +1,3 @@
-Here is the complete, full updated **`main.py`** code. It keeps all your existing features (inventory, sales, customers, expenses, deletion audit logs) and includes the new `/reset-admin` endpoint so you can instantly fix the login anytime.
-
-```python
 from fastapi import FastAPI, HTTPException, Depends
 from pydantic import BaseModel
 from typing import Optional, List
